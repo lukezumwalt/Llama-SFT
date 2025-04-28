@@ -27,6 +27,9 @@ def load_model():
             MODEL_NAME,
             trust_remote_code=True,
         )
+        
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
         # Load model with 4-bit quantization
         model = AutoModelForCausalLM.from_pretrained(
@@ -69,7 +72,7 @@ def preprocess_function(examples, tokenizer):
         inputs,
         padding="max_length",
         truncation=True,
-        max_length=2048,
+        max_length=512,
         return_tensors="pt",
     )
 
@@ -88,13 +91,16 @@ def main():
     dataset = load_from_disk(dataset_path)
     dataset = dataset.map(lambda examples: preprocess_function(examples, tokenizer), batched=True, remove_columns=dataset.column_names)
 
+    # Prune down to 10k samples, 60k is taking 12 hours, so use 10 for litmus
+    dataset = dataset.shuffle(seed=42).select(range(10000))  # <-- slice to 10k examples
+
     # Data collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     # Training arguments
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=2,
+        per_device_train_batch_size=1,
         gradient_accumulation_steps=16,
         learning_rate=2e-4,
         num_train_epochs=3,
@@ -107,10 +113,15 @@ def main():
         bf16=True,  # Important for bfloat16 training
     )
 
+    dataset = dataset.train_test_split(test_size=0.05)
+    train_dataset = dataset["train"]
+    eval_dataset = dataset["test"]
+
     # Trainer setup
     trainer = Trainer(
         model=model,
-        train_dataset=dataset,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
         args=training_args,
     )
